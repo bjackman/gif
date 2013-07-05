@@ -1,0 +1,163 @@
+<!DOCTYPE html>
+<head>
+  <script type="text/javascript" src="libgif-js/libgif.js"></script>
+  <script type="text/javascript" src="oflow/src/flowZone.js"></script>
+  <script type="text/javascript" src="oflow/src/flowCalculator.js"></script>
+</head>
+
+<body>
+
+<p id="text">loading...</p>
+<img src="loader.gif" rel:animated_src="the3.gif" id="the_gif" style:"show:none"/>
+
+<script type="text/javascript">
+  //I'm going to try and hang this function onto a Context
+  function draw_line(colour, startx, starty, endx, endy) {
+    this.strokeStyle = colour;
+    this.beginPath();
+    this.moveTo(startx, starty);
+    this.lineTo(endx, endy);
+    this.stroke();
+  }
+  
+  //take the result from a FlowCalculator.calculate() and draw lines on a canvas
+  //to represent the flow vectors.
+  function draw_flow_vectors(canvas, flow) {
+    var zones = flow.zones;
+    var white = "#FFFFFF";
+    //the flow vectors are real small, so scale them up a bit.
+    var vector_scale_factor = 3;
+    var ctx = canvas.getContext("2d");
+    //this is actually quite fun:
+    ctx.draw_line = draw_line; //now ctx has a draw_line method
+    zones.forEach(function(zone, i, zones) {
+      var endx = zone.x + (vector_scale_factor * zone.u);
+      var endy = zone.y + (vector_scale_factor * zone.v);
+      ctx.draw_line(white, zone.x, zone.y, endx, endy);
+    });
+  }
+
+  //helper method for setting an RGBA colour value to a pixel in an ImageData
+  //(because ImageData presents the pixels in a 1D array)
+  function set_pixel(imageData, x, y, rgba) {
+    var index = (x + (y * imageData.width)) * 4;
+    for (var i = 0; i < 4; i++) {
+      imageData,  imageData.data[index + i] = rgba[index + i];
+    }
+  }
+  //helper method for getting an [r, g, b, a] array out of an ImageData.
+  //(because ImageData presents the pixels in a 1D array)
+  function get_pixel( imageData, x, y) {
+    var index = (x + (y * imageData.width)) * 4;
+    var r = imageData.data[index + 0];
+    var g = imageData.data[index + 1];
+    var b = imageData.data[index + 2];
+    var a = imageData.data[index + 3];
+    return [r, g, b, a];
+  }
+
+  //takes an input context and an output context (which may be the same), and a
+  //set of flow vector zones (as returned by FlowCalculator.calculate).
+  //Copies each pixel from the input context onto the pixel it would be moved to
+  //by its corresponding flow vector.
+  //This is essentially my poor guess at how motion compensation works in MPEG.
+  function apply_flow(in_ctx, out_ctx, zones) {
+    //work out the distance from the centre of each zone to its edge
+    var zone_size = zones[0].x - 1;
+    var width = out_ctx.canvas.width;
+    var height = out_ctx.canvas.height;
+
+    var in_data = in_ctx.getImageData(0, 0, width, height);
+
+    var out_data = out_ctx.createImageData(width, height);
+    
+    //the old image will be the "background" to the new image
+    //don't think there's a faster way to do this as the arrays in question are
+    //Uint8ClampedArrays, so slice() isn't available
+    //If you're reading this code and know this to be wrong, let me know please
+    for (var i = 0; i < out_data.data.length; i++) {
+      out_data.data[i] = in_data.data[i];
+    }
+
+    zones.forEach( function(zone, i, zones) {
+      //work out edges of zones to avoid getting out-of-bounds indices
+      var zonestart_x = Math.max(0, zone.x - zone_size);
+      var zonestart_y = Math.max(0, zone.y - zone_size);
+      var zoneend_x = Math.min(width, zone.x + zone_size);
+      var zoneend_y = Math.min(height, zone.y + zone_size);
+      for(var in_x = zonestart_x; in_x <= zoneend_x; in_x++) {
+        for(var in_y = zonestart_y; in_y <= zoneend_y; in_y++) {
+          var out_x = Math.floor(in_x + zone.u);
+          var out_y = Math.floor(in_y + zone.v);
+
+          //copy the pixel from in_data[in_x][in_y] to out_data[out_x][out_y]
+          var in_index = (in_x + (in_data.width * in_y)) *4;
+          var out_index = (out_x + (out_data.width * out_y)) *4;
+          for (var i = 0; i < 4; i++) {
+            out_data.data[out_index + i] = in_data.data[in_index + i];
+          }
+        }
+      }
+    });
+
+    out_ctx.putImageData(out_data, 0, 0);
+  }
+    
+  function main(super_gif) {
+    var pen_frame, last_frame;
+    //?? Might not be precise enough.
+    var zone_size = 4;
+    var num_frames = super_gif.get_length();
+    pen_frame = super_gif.get_frame_data(num_frames - 2);
+    last_frame = super_gif.get_frame_data(num_frames - 1);
+    var calculator = new FlowCalculator(zone_size);
+    console.log("calculating..");
+    ret = calculator.calculate(pen_frame.data, last_frame.data,
+                               pen_frame.width, pen_frame.height);
+    console.log("..calculated");
+    canvas = super_gif.get_canvas();
+    ctx = canvas.getContext("2d");
+    console.log("played once");
+    var do_apply_flow = function(i) {
+      console.log("applying_flow..");
+      apply_flow(ctx, ctx, ret.zones);
+      console.log("..applying_flow");
+      if (i < 30) {
+        window.setTimeout( 
+          function() { do_apply_flow(i + 1) },
+          super_gif.get_frame_period());
+      }
+    }
+    canvas.onclick = function() {
+      super_gif.play_once(function() { do_apply_flow(0) });
+    }
+  };
+
+  var gif = document.getElementById("the_gif");
+  var sg = new SuperGif({ gif : gif, 
+                          rubbable : false,
+                          auto_play : false
+                        });
+
+  //this function will mess with stuff on the screen so don't EVER call it.
+  sg.get_frame_data = function(index) {
+    var canvas = this.get_canvas();
+    var ctx = canvas.getContext("2d");
+    var width = canvas.width;
+    var height = canvas.height;
+    this.pause();
+    this.move_to(index);
+    var imgData = ctx.getImageData(0, 0, width, height );
+    return imgData;
+  }
+
+  
+  sg.load( function () {
+    console.log("loaded")
+    document.getElementById("text").innerHTML = "Click.";
+    main(sg);
+  });
+</script>
+
+
+</body>
